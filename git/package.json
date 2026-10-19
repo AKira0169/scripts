@@ -2,8 +2,8 @@
   "name": "git",
   "private": true,
   "scripts": {
-    "pull": "powershell -NoProfile -ExecutionPolicy Bypass -File pull-all.ps1",
-    "prune": "powershell -NoProfile -ExecutionPolicy Bypass -File prune-local.ps1",
-    "merge": "powershell -NoProfile -ExecutionPolicy Bypass -File merge-branches.ps1"
+    "pull": "node ../run-sh.js pull-all.sh",
+    "prune": "node ../run-sh.js prune-local.sh",
+    "merge": "node ../run-sh.js merge-branches.sh"
   }
 }

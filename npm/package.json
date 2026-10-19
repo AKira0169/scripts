@@ -2,7 +2,7 @@
   "name": "npm",
   "private": true,
   "scripts": {
-    "i": "powershell -NoProfile -ExecutionPolicy Bypass -File npm-install.ps1",
-    "i:all": "powershell -NoProfile -ExecutionPolicy Bypass -File npm-install.ps1 -All"
+    "i": "node ../run-sh.js npm-install.sh",
+    "i:all": "node ../run-sh.js npm-install.sh --all"
   }
 }

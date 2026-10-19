@@ -1,0 +1,3 @@
+# bash fails on CRLF ($'\r': command not found), so keep shell scripts LF on every OS
+*.sh text eol=lf
+*.cmd text eol=crlf
