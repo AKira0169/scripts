@@ -4,6 +4,8 @@
   "scripts": {
     "pull": "node ../run-sh.js pull-all.sh",
     "prune": "node ../run-sh.js prune-local.sh",
+    "prune:dry": "node ../run-sh.js prune-local.sh --dry-run",
+    "prune:force": "node ../run-sh.js prune-local.sh --force",
     "merge": "node ../run-sh.js merge-branches.sh"
   }
 }

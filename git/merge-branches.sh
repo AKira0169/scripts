@@ -23,9 +23,12 @@
 #   2. PREFLIGHT- git fetch --prune; report each repo's working-tree state and how far
 #                 behind origin main/dev are. Repos that are dirty or can't fast-forward
 #                 are marked and SKIPPED (they are never force-updated or stashed).
+#                 Repos whose source or target has unpushed local commits are SKIPPED
+#                 too, so a merge+push never publishes them by accident (--allow-unpushed).
 #   3. CONFIRM  - shows the plan; asks to proceed (skip with --yes).
 #   4. MERGE    - per clean repo: ff-pull main, ff-pull dev, merge main -> dev.
-#                 A conflicting merge is aborted and reported (working tree left clean).
+#                 A conflicting merge is aborted and reported (working tree left clean);
+#                 any other merge failure is reported as ERROR.
 #   5. PUSH     - optional. Off by default; prompts in interactive mode, or force --push.
 #   6. SUMMARY  - pass/fail table. The original branch of each repo is restored.
 #
@@ -37,6 +40,7 @@
 #   bash merge-branches.sh --source main --target uat --push   # explicit branches skip the picker
 #   bash merge-branches.sh --fetch-branches # fetch --prune every repo before listing branches
 #   bash merge-branches.sh --root /path/to/UnifiedPlatform
+#   bash merge-branches.sh --allow-unpushed # merge even if source/target have unpushed commits
 #   (PowerShell-style flags like -Source / -Yes / -FetchBranches also work)
 #
 # NOTES:
@@ -59,19 +63,24 @@ TARGET=dev
 PUSH=0
 YES=0
 FETCH_BRANCHES=0
+ALLOW_UNPUSHED=0
 ROOT=''
 SRC_EXPLICIT=0
 TGT_EXPLICIT=0
 
+# fail if option $1 has no value ($2 empty or another flag)
+need_val() { [ -n "$2" ] && [ "${2#-}" = "$2" ] || { echo "Missing value for $1" >&2; exit 1; }; }
+
 while [ $# -gt 0 ]; do
     case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-')" in
-        repos)         REPOS+=($(printf '%s' "$2" | tr ',' ' ')); shift ;;
-        source)        SOURCE=$2; SRC_EXPLICIT=1; shift ;;
-        target)        TARGET=$2; TGT_EXPLICIT=1; shift ;;
+        repos)         need_val "$1" "$2"; REPOS+=($(printf '%s' "$2" | tr ',' ' ')); shift ;;
+        source)        need_val "$1" "$2"; SOURCE=$2; SRC_EXPLICIT=1; shift ;;
+        target)        need_val "$1" "$2"; TARGET=$2; TGT_EXPLICIT=1; shift ;;
         push)          PUSH=1 ;;
         yes)           YES=1 ;;
         fetchbranches) FETCH_BRANCHES=1 ;;
-        root)          ROOT=$2; shift ;;
+        allowunpushed) ALLOW_UNPUSHED=1 ;;
+        root)          need_val "$1" "$2"; ROOT=$2; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
@@ -505,9 +514,15 @@ for k in "${!SEL[@]}"; do
     tgt_ahead=$(count_behind "$dir" "origin/$T" "$T")   # local-only commits on target
 
     reasons=()
-    [ $clean = False ]                                     && reasons+=('dirty working tree')
-    [ "$src_behind" -gt 0 ] && [ "$src_ahead" -gt 0 ] && reasons+=("$S diverged from origin")
-    [ "$tgt_behind" -gt 0 ] && [ "$tgt_ahead" -gt 0 ] && reasons+=("$T diverged from origin")
+    [ $clean = False ] && reasons+=('dirty working tree')
+    # local-only commits: diverged can't fast-forward; merely ahead would get merged/pushed unnoticed
+    for pair in "$S $src_ahead $src_behind" "$T $tgt_ahead $tgt_behind"; do
+        read -r b n_ahead n_behind <<<"$pair"
+        [ "$n_ahead" -gt 0 ] || continue
+        if [ "$n_behind" -gt 0 ]; then reasons+=("$b diverged from origin")
+        elif [ $ALLOW_UNPUSHED -eq 0 ]; then reasons+=("$b has $n_ahead unpushed commit(s); --allow-unpushed to merge anyway")
+        fi
+    done
 
     echo "  clean: $clean   $S behind origin: $src_behind   $T behind origin: $tgt_behind   to merge: $to_merge"
     if [ ${#reasons[@]} -eq 0 ]; then
@@ -534,40 +549,47 @@ if [ $YES -eq 0 ]; then
     echo "  merge  : $SOURCE -> $TARGET"
     echo "  repos  : ${#ready_names[@]} -> $(join_by ', ' "${ready_names[@]}")"
     if [ $PUSH -eq 0 ]; then
-        read -r -p "Push each merged '$TARGET' to origin afterwards? [y/N]: " a
+        read -r -p "Push each merged '$TARGET' to origin afterwards? [y/N]: " a || { echo; echo "Aborted (no input)."; exit 1; }
         case "$a" in [Yy]*) DO_PUSH=1 ;; *) DO_PUSH=0 ;; esac
     fi
     if [ $DO_PUSH -eq 1 ]; then echo "  push   : yes -> origin/$TARGET"; else echo "  push   : no (local merge only)"; fi
-    read -r -p "Proceed? [Y/n]: " a
+    # EOF (closed/piped stdin) must not count as the default "yes"
+    read -r -p "Proceed? [Y/n]: " a || { echo; echo "Aborted (no input)."; exit 1; }
     case "$a" in [Nn]*) echo "Aborted."; exit 0 ;; esac
 fi
 
 # --- merge -------------------------------------------------------------------
+# Check out <branch> fast-forwarded to origin; a branch that only exists on origin gets an
+# explicit local tracking branch (a bare `checkout` guesses, and fails with several remotes).
+checkout_latest() {
+    local dir=$1 b=$2
+    if [ "$(branch_loc "$dir" "$b")" != local ]; then
+        git_run "$dir" checkout -b "$b" "origin/$b" || { NOTE="create $b failed"; return 1; }
+        return 0
+    fi
+    git_run "$dir" checkout "$b" || { NOTE="checkout $b failed"; return 1; }
+    if [ "$(count_behind "$dir" "$b" "origin/$b")" -gt 0 ]; then
+        say "$C_GRAY" "  pulling $b ..."
+        git_run "$dir" pull --ff-only origin "$b" || { NOTE="pull $b failed"; return 1; }
+    fi
+}
+
 # Merges one repo; sets MERGE_STATUS / PUSH_STATUS / NOTE. Returns 1 with NOTE set on error.
 merge_repo() {
     local dir=$1 S=$2 T=$3 before after ahead
-    # 1) update source to latest (fast-forward only)
-    git_run "$dir" checkout "$S" || { NOTE="checkout $S failed"; return 1; }
-    if [ "$(count_behind "$dir" "$S" "origin/$S")" -gt 0 ]; then
-        say "$C_GRAY" "  pulling $S ..."
-        git_run "$dir" pull --ff-only origin "$S" || { NOTE="pull $S failed"; return 1; }
-    fi
+    # 1) update source, then target, to latest (fast-forward only)
+    checkout_latest "$dir" "$S" || return 1
+    checkout_latest "$dir" "$T" || return 1
 
-    # 2) update target to latest (create local tracking branch if needed)
-    if [ "$(branch_loc "$dir" "$T")" = local ]; then
-        git_run "$dir" checkout "$T" || { NOTE="checkout $T failed"; return 1; }
-        if [ "$(count_behind "$dir" "$T" "origin/$T")" -gt 0 ]; then
-            say "$C_GRAY" "  pulling $T ..."
-            git_run "$dir" pull --ff-only origin "$T" || { NOTE="pull $T failed"; return 1; }
-        fi
-    else
-        git_run "$dir" checkout -b "$T" "origin/$T" || { NOTE="create $T failed"; return 1; }
-    fi
-
-    # 3) merge source -> target
+    # 2) merge source -> target
     before=$(git -C "$dir" rev-parse HEAD)
     say "$C_GRAY" "  merging $S -> $T ..."
     if ! git_run "$dir" merge --no-edit "$S"; then
+        # MERGE_HEAD exists only for a real conflict; otherwise the merge never started
+        # (e.g. an untracked file would be overwritten) and the caller reports ERROR.
+        if ! git -C "$dir" rev-parse -q --verify MERGE_HEAD >/dev/null; then
+            NOTE="merge $S failed"; return 1
+        fi
         git_cap "$dir" merge --abort   # leave tree clean
         MERGE_STATUS=CONFLICT
         NOTE='merge conflict (aborted)'
@@ -583,7 +605,7 @@ merge_repo() {
         say "$C_GREEN" "  MERGED."
     fi
 
-    # 4) push (optional) - only if target has commits origin doesn't
+    # 3) push (optional) - only if target has commits origin doesn't
     if [ $DO_PUSH -eq 1 ]; then
         ahead=$(count_behind "$dir" "origin/$T" "$T")
         if [ "$ahead" -gt 0 ]; then
@@ -610,6 +632,8 @@ for k in "${!SEL[@]}"; do
     fi
 
     orig=$(current_branch "$dir")
+    # detached HEAD: remember the commit, since `checkout HEAD` would restore nothing
+    [ "$orig" = HEAD ] && orig=$(git -C "$dir" rev-parse HEAD)
     echo
     say "$C_CYAN" "=== $name ==="
     MERGE_STATUS=PENDING; PUSH_STATUS=-; NOTE=''
@@ -622,7 +646,7 @@ for k in "${!SEL[@]}"; do
     fi
     # restore the branch the repo started on
     if [ -n "$orig" ] && [ "$(current_branch "$dir")" != "$orig" ]; then
-        git_cap "$dir" checkout "$orig"
+        git_cap "$dir" checkout --quiet "$orig" || say "$C_RED" "  could not restore '$orig': $GOUT"
     fi
 
     R_REPO+=("$name"); R_MERGE+=("$MERGE_STATUS"); R_PUSH+=("$PUSH_STATUS"); R_NOTE+=("$NOTE")

@@ -21,10 +21,13 @@ REPOS=()
 ALL=0
 DRY_RUN=0
 
+# fail if option $1 has no value ($2 empty or another flag)
+need_val() { [ -n "$2" ] && [ "${2#-}" = "$2" ] || { echo "Missing value for $1" >&2; exit 1; }; }
+
 while [ $# -gt 0 ]; do
     case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-')" in
-        root)   ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
-        repos)  REPOS+=("$2"); shift ;;
+        root)   need_val "$1" "$2"; ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
+        repos)  need_val "$1" "$2"; REPOS+=("$2"); shift ;;
         all)    ALL=1 ;;
         dryrun) DRY_RUN=1 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -54,6 +57,7 @@ if [ ${#FILTERS[@]} -gt 0 ]; then
     shopt -u nocasematch
     REPO_DIRS=("${keep[@]}")
 fi
+if [ ${#REPO_DIRS[@]} -eq 0 ]; then echo "No git repos found under $ROOT"; exit 1; fi
 
 # exit 0 if the package.json on stdin declares dependencies or devDependencies
 has_deps() {

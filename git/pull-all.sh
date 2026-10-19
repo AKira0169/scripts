@@ -23,17 +23,21 @@ TRACK_ALL=0
 FETCH_ONLY=0
 THROTTLE=6
 
+# fail if option $1 has no value ($2 empty or another flag)
+need_val() { [ -n "$2" ] && [ "${2#-}" = "$2" ] || { echo "Missing value for $1" >&2; exit 1; }; }
+
 while [ $# -gt 0 ]; do
     case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-')" in
-        root)      ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
-        repos)     REPOS+=("$2"); shift ;;
+        root)      need_val "$1" "$2"; ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
+        repos)     need_val "$1" "$2"; REPOS+=("$2"); shift ;;
         trackall)  TRACK_ALL=1 ;;
         fetchonly) FETCH_ONLY=1 ;;
-        throttle)  THROTTLE=$2; shift ;;
+        throttle)  need_val "$1" "$2"; THROTTLE=$2; shift ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
     esac
     shift
 done
+if ! [[ $THROTTLE =~ ^[1-9][0-9]*$ ]]; then echo "--throttle must be a positive number, got '$THROTTLE'" >&2; exit 1; fi
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     C_CYAN=$'\033[36m'; C_RESET=$'\033[0m'

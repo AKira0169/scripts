@@ -19,10 +19,13 @@ REPOS=()
 FORCE=0
 DRY_RUN=0
 
+# fail if option $1 has no value ($2 empty or another flag)
+need_val() { [ -n "$2" ] && [ "${2#-}" = "$2" ] || { echo "Missing value for $1" >&2; exit 1; }; }
+
 while [ $# -gt 0 ]; do
     case "$(printf '%s' "$1" | tr 'A-Z' 'a-z' | tr -d '-')" in
-        root)   ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
-        repos)  REPOS+=("$2"); shift ;;
+        root)   need_val "$1" "$2"; ROOT=$(cd "$2" && pwd -P) || exit 1; shift ;;
+        repos)  need_val "$1" "$2"; REPOS+=("$2"); shift ;;
         force)  FORCE=1 ;;
         dryrun) DRY_RUN=1 ;;
         *) echo "Unknown argument: $1" >&2; exit 1 ;;
@@ -64,12 +67,12 @@ if [ ${#REPO_DIRS[@]} -eq 0 ]; then echo "No git repos found under $ROOT"; exit 
 if [ $DRY_RUN -eq 1 ]; then mode='DRY RUN'; elif [ $FORCE -eq 1 ]; then mode='force (-D)'; else mode='safe (-d)'; fi
 say "$C_CYAN" "Pruning local branches whose remote is gone in ${#REPO_DIRS[@]} repos [$mode]..."
 
-total_deleted=0; total_kept=0
+total_deleted=0; total_kept=0; n_failed=0
 for dir in "${REPO_DIRS[@]}"; do
     if [ "$dir" = "$ROOT" ]; then name='(umbrella)'; else name=${dir##*/}; fi
 
     if ! out=$(git -C "$dir" fetch --all --prune --quiet 2>&1); then
-        say "$C_RED" "$name : fetch FAILED, skipped. $out"; continue
+        say "$C_RED" "$name : fetch FAILED, skipped. $out"; n_failed=$((n_failed + 1)); continue
     fi
 
     current=$(git -C "$dir" branch --show-current 2>/dev/null)
@@ -99,7 +102,9 @@ for dir in "${REPO_DIRS[@]}"; do
 done
 
 if [ $DRY_RUN -eq 1 ]; then verb='would be deleted'; else verb='deleted'; fi
-echo; say "$C_CYAN" "Summary: $total_deleted branches $verb, $total_kept kept."
+echo; say "$C_CYAN" "Summary: $total_deleted branches $verb, $total_kept kept, $n_failed fetch failures."
 if [ $total_kept -gt 0 ] && [ $FORCE -eq 0 ] && [ $DRY_RUN -eq 0 ]; then
-    say "$C_DKYELLOW" "'not merged' branches were kept to protect unmerged commits (common after squash-merge). Use prune:force to delete them anyway."
+    say "$C_DKYELLOW" "'not merged' branches were kept to protect unmerged commits (common after squash-merge). Use 'npm run prune:force' (or --force) to delete them anyway."
 fi
+[ $n_failed -gt 0 ] && exit 2
+exit 0
